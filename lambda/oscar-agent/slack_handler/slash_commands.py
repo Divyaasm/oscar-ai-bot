@@ -174,8 +174,8 @@ class SlashCommandHandlers:
             return
 
         # Build OAuth URL with state = user_id:workspace_id
-        client_id = os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
-        callback_url = os.environ.get("OAUTH_CALLBACK_URL", "")
+        client_id = config.github_oauth_client_id
+        callback_url = config.oauth_callback_url
         state = f"{user_id}:{workspace_id}"
         oauth_url = (
             f"https://github.com/login/oauth/authorize"

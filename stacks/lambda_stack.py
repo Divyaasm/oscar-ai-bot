@@ -161,7 +161,7 @@ class OscarLambdaStack(Stack):
             memory_size=256,
             environment={
                 "WORKSPACE_TABLES": _json.dumps(workspace_tables),
-                "IDENTITY_SECRET_NAME": f"oscar-identity-oauth-{self.env_name}",
+                "CENTRAL_SECRET_NAME": self.secrets_stack.central_env_secret.secret_name,
             },
             role=role,
             description="OAuth callback handler for Slack-GitHub identity linking",
@@ -170,6 +170,7 @@ class OscarLambdaStack(Stack):
         for t in self.identity_stack.identity_tables.values():
             t.grant_read_write_data(role)
         self.secrets_stack.grant_read_access(role)
+
         self.lambda_functions["identity"] = function
 
     # ------------------------------------------------------------ agents
@@ -272,8 +273,6 @@ class OscarLambdaStack(Stack):
             import json as _json
             workspace_tables = {wid: t.table_name for wid, t in self.identity_stack.identity_tables.items()}
             env["WORKSPACE_TABLES"] = _json.dumps(workspace_tables)
-            env["GITHUB_OAUTH_CLIENT_ID"] = os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
-            env["OAUTH_CALLBACK_URL"] = os.environ.get("OAUTH_CALLBACK_URL", "")
         return env
 
     def _get_communication_handler_environment_variables(self) -> Dict[str, str]:

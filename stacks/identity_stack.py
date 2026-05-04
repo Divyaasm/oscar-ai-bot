@@ -36,7 +36,6 @@ class OscarIdentityStack(Stack):
                 ),
             )
 
-            # GSI for lookup by slack_user_id (hot path)
             table.add_global_secondary_index(
                 index_name="slack-user-index",
                 partition_key=dynamodb.Attribute(name="slack_user_id", type=dynamodb.AttributeType.STRING),
