@@ -138,7 +138,6 @@ def main() -> None:
 
     # 7. API Gateway
     # Custom domain hosted zone is driven per-environment via API_CUSTOM_DOMAIN
-    # (set in the environment's .env file). Phase 1 creates only the hosted zone.
     api_custom_domain = os.environ.get("API_CUSTOM_DOMAIN", "").strip() or None
 
     api_gateway_stack = OscarApiGatewayStack(

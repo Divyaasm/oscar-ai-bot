@@ -238,7 +238,8 @@ class TestOAuthCallbackRoute:
 def _build_template(custom_domain=None, environment="prod"):
     """Synthesise the API Gateway stack, optionally with a custom domain."""
     app = App()
-    helper = Stack(app, "HelperHostedZone", env=ENV)
+
+    helper = Stack(app, "HelperCustomDomain", env=ENV)
 
     mock_fn = aws_lambda.Function(
         helper, "MockLambda",
@@ -247,6 +248,7 @@ def _build_template(custom_domain=None, environment="prod"):
         code=aws_lambda.Code.from_inline("def handler(e,c): pass"),
         function_name="oscar-supervisor-agent-dev",
     )
+
     mock_webhook_fn = aws_lambda.Function(
         helper, "MockWebhookLambda",
         runtime=aws_lambda.Runtime.PYTHON_3_12,
@@ -254,6 +256,7 @@ def _build_template(custom_domain=None, environment="prod"):
         code=aws_lambda.Code.from_inline("def handler(e,c): pass"),
         function_name="oscar-github-webhook-handler-dev",
     )
+
     mock_role = iam.Role(
         helper, "MockApiGwRole",
         assumed_by=iam.ServicePrincipal("apigateway.amazonaws.com"),
@@ -271,7 +274,7 @@ def _build_template(custom_domain=None, environment="prod"):
     permissions_stack.api_gateway_role = mock_role
 
     stack = OscarApiGatewayStack(
-        app, "TestApiGatewayHostedZone",
+        app, "TestApiGatewayCustomDomain",
         lambda_stack=lambda_stack,
         permissions_stack=permissions_stack,
         environment=environment,
@@ -281,22 +284,48 @@ def _build_template(custom_domain=None, environment="prod"):
     return Template.from_stack(stack)
 
 
-class TestCustomDomainHostedZone:
-    """Phase 1: only a public hosted zone is created for the custom domain."""
+class TestCustomDomain:
+    """Test cases for the optional API Gateway custom domain (Phase 2)."""
 
-    def test_no_hosted_zone_when_domain_unset(self):
-        """No hosted zone or cert when custom_domain is None."""
+    def test_no_certificate_when_domain_unset(self):
+        """No ACM certificate or custom domain when custom_domain is None."""
         template = _build_template(custom_domain=None)
-        template.resource_count_is("AWS::Route53::HostedZone", 0)
+        template.resource_count_is("AWS::CertificateManager::Certificate", 0)
+        template.resource_count_is("AWS::ApiGateway::DomainName", 0)
 
-    def test_public_hosted_zone_created_for_prod(self):
-        """A public hosted zone is created for the prod domain."""
-        template = _build_template(
-            custom_domain="oscar-prod.opensearch.org", environment="prod"
-        )
+    def test_certificate_created_when_domain_set(self):
+        """An ACM certificate is created for the configured domain."""
+        template = _build_template(custom_domain="api.oscar.example.com")
+        template.resource_count_is("AWS::CertificateManager::Certificate", 1)
+        template.has_resource_properties("AWS::CertificateManager::Certificate", {
+            "DomainName": "api.oscar.example.com",
+            "ValidationMethod": "DNS",
+        })
+
+    def test_custom_domain_created_when_domain_set(self):
+        """A regional API Gateway custom domain is created with TLS 1.2."""
+        template = _build_template(custom_domain="api.oscar.example.com")
+        template.resource_count_is("AWS::ApiGateway::DomainName", 1)
+        template.has_resource_properties("AWS::ApiGateway::DomainName", {
+            "DomainName": "api.oscar.example.com",
+            "SecurityPolicy": "TLS_1_2",
+        })
+
+    def test_base_path_mapping_created(self):
+        """The custom domain should be mapped to the API under the stage name."""
+        template = _build_template(custom_domain="api.oscar.example.com")
+        template.resource_count_is("AWS::ApiGateway::BasePathMapping", 1)
+        template.has_resource_properties("AWS::ApiGateway::BasePathMapping", {
+            "BasePath": "prod",
+        })
+
+    def test_public_hosted_zone_created_when_domain_set(self):
+        """A public Route 53 hosted zone is created for the domain."""
+        template = _build_template(custom_domain="oscar.opensearch.org")
         template.resource_count_is("AWS::Route53::HostedZone", 1)
         template.has_resource_properties("AWS::Route53::HostedZone", {
-            "Name": "oscar-prod.opensearch.org.",
+            # Route 53 stores the zone name with a trailing dot.
+            "Name": "oscar.opensearch.org.",
         })
 
     def test_public_hosted_zone_created_for_beta(self):
@@ -313,15 +342,62 @@ class TestCustomDomainHostedZone:
             "Name": "oscar-beta.opensearch.org.",
         })
 
-    def test_phase1_creates_no_cert_or_domain(self):
-        """Phase 1 must NOT create a cert, custom domain, or alias record."""
-        template = _build_template(custom_domain="oscar-prod.opensearch.org")
-        template.resource_count_is("AWS::CertificateManager::Certificate", 0)
-        template.resource_count_is("AWS::ApiGateway::DomainName", 0)
-        template.resource_count_is("AWS::Route53::RecordSet", 0)
-
     def test_hosted_zone_retained_on_delete(self):
-        template = _build_template(custom_domain="oscar-prod.opensearch.org")
+        """The hosted zone must be retained on stack deletion."""
+        template = _build_template(custom_domain="oscar.opensearch.org")
         template.has_resource("AWS::Route53::HostedZone", {
             "DeletionPolicy": "Retain",
         })
+
+    def test_no_hosted_zone_when_domain_unset(self):
+        """No hosted zone or records when custom_domain is None."""
+        template = _build_template(custom_domain=None)
+        template.resource_count_is("AWS::Route53::HostedZone", 0)
+        template.resource_count_is("AWS::Route53::RecordSet", 0)
+
+    def test_alias_record_created_when_domain_set(self):
+        """An alias A-record routes the domain at the API Gateway."""
+        template = _build_template(custom_domain="oscar.opensearch.org")
+        template.has_resource_properties("AWS::Route53::RecordSet", {
+            "Type": "A",
+            "Name": "oscar.opensearch.org.",
+        })
+
+    def test_base_path_matches_env_name(self):
+        template = _build_template(
+            custom_domain="oscar-beta.opensearch.org", environment="beta"
+        )
+        template.has_resource_properties("AWS::ApiGateway::BasePathMapping", {
+            "BasePath": "beta",
+        })
+
+    def test_base_path_not_duplicated(self):
+        template = _build_template(
+            custom_domain="oscar-prod.opensearch.org", environment="prod"
+        )
+
+        mappings = template.find_resources("AWS::ApiGateway::BasePathMapping")
+        assert len(mappings) == 1, f"expected 1 base path mapping, got {len(mappings)}"
+
+        base_path = list(mappings.values())[0]["Properties"]["BasePath"]
+        assert base_path == "prod", f"base path should be bare 'prod', got {base_path!r}"
+
+        resources = template.find_resources("AWS::ApiGateway::Resource")
+        path_parts = [r["Properties"].get("PathPart") for r in resources.values()]
+        assert "prod" not in path_parts, (
+            f"no route segment should be named 'prod' (would double the prefix); "
+            f"found path parts: {path_parts}"
+        )
+        for expected in ("slack", "github"):
+            assert path_parts.count(expected) == 1, (
+                f"expected exactly one '{expected}' segment, got {path_parts.count(expected)}"
+            )
+
+    def test_base_path_mapping_targets_deployment_stage(self):
+        template = _build_template(
+            custom_domain="oscar-prod.opensearch.org", environment="prod"
+        )
+        mappings = template.find_resources("AWS::ApiGateway::BasePathMapping")
+        props = list(mappings.values())[0]["Properties"]
+        assert "Stage" in props, "base path mapping must reference a stage"
+        assert "RestApiId" in props, "base path mapping must reference the REST API"

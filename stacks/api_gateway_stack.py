@@ -16,8 +16,10 @@ from typing import Any, Optional
 
 from aws_cdk import RemovalPolicy, Stack
 from aws_cdk import aws_apigateway as apigateway
+from aws_cdk import aws_certificatemanager as acm
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_route53 as route53
+from aws_cdk import aws_route53_targets as route53_targets
 from aws_cdk import aws_wafv2 as wafv2
 from constructs import Construct
 
@@ -50,13 +52,11 @@ class OscarApiGatewayStack(Stack):
             lambda_stack: The Lambda stack with functions
             permissions_stack: The permissions stack with IAM roles
             environment: The deployment environment name (e.g. beta, prod)
-            custom_domain: Optional custom domain name (e.g. oscar-prod.opensearch.org).
-                When set, this stack creates a PUBLIC Route 53 hosted zone for the
-                domain. This is Phase 1 of the custom domain rollout: the zone must
-                exist before its name servers can be delegated (NS records) under
-                the parent domain (opensearch.org). The ACM certificate and API
-                Gateway custom domain are added in a later phase, once the NS
-                delegation is in place. Leave None to disable.
+            custom_domain: Optional custom domain name. When set, this stack creates
+            a PUBLIC Route 53 hosted zone for the domain, an ACM certificate validated
+            against that zone, an API Gateway custom domain, and an alias A-record
+            pointing at it.Leave None to disable.
+
             **kwargs: Additional keyword arguments for Stack
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -195,18 +195,50 @@ class OscarApiGatewayStack(Stack):
 
     def _configure_custom_domain(self, custom_domain: str) -> None:
         """
-        Create a PUBLIC Route 53 hosted zone for the custom domain (Phase 1).
-
-        This is intentionally the ONLY custom-domain resource created here. The
-        ACM certificate and API Gateway custom domain are added in a later phase
+        Attach a custom domain to the API using an in-stack ACM certificate,
+        backed by a public Route 53 hosted zone owned by this account.
 
         """
+        # 1. Public hosted zone owned by this account for the subdomain.
         hosted_zone = route53.PublicHostedZone(
             self, "ApiCustomDomainHostedZone",
             zone_name=custom_domain,
         )
         hosted_zone.apply_removal_policy(RemovalPolicy.RETAIN)
         self.hosted_zone = hosted_zone
+
+        # 2. ACM certificate validated against the zone above (automatic).
+        certificate = acm.Certificate(
+            self, "ApiCustomDomainCert",
+            domain_name=custom_domain,
+            validation=acm.CertificateValidation.from_dns(hosted_zone),
+        )
+
+        # 3. Regional API Gateway custom domain using the validated certificate.
+        domain_name = apigateway.DomainName(
+            self, "ApiCustomDomain",
+            domain_name=custom_domain,
+            certificate=certificate,
+            endpoint_type=apigateway.EndpointType.REGIONAL,
+            security_policy=apigateway.SecurityPolicy.TLS_1_2,
+        )
+
+        # 3a. Base path mapping under the environment name (e.g. "prod") so URLs keep the stage prefix: https://<domain>/prod/slack/events. This
+        #     mirrors the default execute-api URL structure (/<stage>/...).
+        domain_name.add_base_path_mapping(
+            self.api,
+            base_path=self.env_name,
+            stage=self.api.deployment_stage,
+        )
+
+        # 4. Alias A-record at the zone apex routing the domain at the API
+        route53.ARecord(
+            self, "ApiCustomDomainAliasRecord",
+            zone=hosted_zone,
+            target=route53.RecordTarget.from_alias(
+                route53_targets.ApiGatewayDomain(domain_name)
+            ),
+        )
 
     def _create_waf(self) -> wafv2.CfnWebACL:
         """Create a WAFv2 WebACL with rate limiting, managed rules, and size constraints."""
