@@ -55,7 +55,7 @@ class OscarApiGatewayStack(Stack):
             custom_domain: Optional custom domain name. When set, this stack creates
             a PUBLIC Route 53 hosted zone for the domain, an ACM certificate validated
             against that zone, an API Gateway custom domain, and an alias A-record
-            pointing at it.Leave None to disable.
+            pointing at it. Leave None to disable.
 
             **kwargs: Additional keyword arguments for Stack
         """
