@@ -233,3 +233,95 @@ class TestOAuthCallbackRoute:
             if v.get("Properties", {}).get("HttpMethod") == "GET"
         ]
         assert len(get_methods) == 0
+
+
+def _build_template(custom_domain=None, environment="prod"):
+    """Synthesise the API Gateway stack, optionally with a custom domain."""
+    app = App()
+    helper = Stack(app, "HelperHostedZone", env=ENV)
+
+    mock_fn = aws_lambda.Function(
+        helper, "MockLambda",
+        runtime=aws_lambda.Runtime.PYTHON_3_12,
+        handler="index.handler",
+        code=aws_lambda.Code.from_inline("def handler(e,c): pass"),
+        function_name="oscar-supervisor-agent-dev",
+    )
+    mock_webhook_fn = aws_lambda.Function(
+        helper, "MockWebhookLambda",
+        runtime=aws_lambda.Runtime.PYTHON_3_12,
+        handler="index.handler",
+        code=aws_lambda.Code.from_inline("def handler(e,c): pass"),
+        function_name="oscar-github-webhook-handler-dev",
+    )
+    mock_role = iam.Role(
+        helper, "MockApiGwRole",
+        assumed_by=iam.ServicePrincipal("apigateway.amazonaws.com"),
+    )
+
+    lambda_stack = MagicMock()
+    lambda_stack.lambda_functions = {
+        "oscar-supervisor-agent-dev": mock_fn,
+        "oscar-github-webhook-handler-dev": mock_webhook_fn,
+    }
+    lambda_stack.get_supervisor_agent_function_name.return_value = "oscar-supervisor-agent-dev"
+    lambda_stack.get_github_webhook_handler_function_name.return_value = "oscar-github-webhook-handler-dev"
+
+    permissions_stack = MagicMock()
+    permissions_stack.api_gateway_role = mock_role
+
+    stack = OscarApiGatewayStack(
+        app, "TestApiGatewayHostedZone",
+        lambda_stack=lambda_stack,
+        permissions_stack=permissions_stack,
+        environment=environment,
+        custom_domain=custom_domain,
+        env=ENV,
+    )
+    return Template.from_stack(stack)
+
+
+class TestCustomDomainHostedZone:
+    """Phase 1: only a public hosted zone is created for the custom domain."""
+
+    def test_no_hosted_zone_when_domain_unset(self):
+        """No hosted zone or cert when custom_domain is None."""
+        template = _build_template(custom_domain=None)
+        template.resource_count_is("AWS::Route53::HostedZone", 0)
+
+    def test_public_hosted_zone_created_for_prod(self):
+        """A public hosted zone is created for the prod domain."""
+        template = _build_template(
+            custom_domain="oscar-prod.opensearch.org", environment="prod"
+        )
+        template.resource_count_is("AWS::Route53::HostedZone", 1)
+        template.has_resource_properties("AWS::Route53::HostedZone", {
+            "Name": "oscar-prod.opensearch.org.",
+        })
+
+    def test_public_hosted_zone_created_for_beta(self):
+        """A public hosted zone is created for the beta domain.
+
+        The beta pipeline deploys with ENVIRONMENT=dev (see deploy-beta.yml),
+        so environment is "dev" here. The zone name comes from the custom_domain
+        value (from beta.env), not from the environment name.
+        """
+        template = _build_template(
+            custom_domain="oscar-beta.opensearch.org", environment="dev"
+        )
+        template.has_resource_properties("AWS::Route53::HostedZone", {
+            "Name": "oscar-beta.opensearch.org.",
+        })
+
+    def test_phase1_creates_no_cert_or_domain(self):
+        """Phase 1 must NOT create a cert, custom domain, or alias record."""
+        template = _build_template(custom_domain="oscar-prod.opensearch.org")
+        template.resource_count_is("AWS::CertificateManager::Certificate", 0)
+        template.resource_count_is("AWS::ApiGateway::DomainName", 0)
+        template.resource_count_is("AWS::Route53::RecordSet", 0)
+
+    def test_hosted_zone_retained_on_delete(self):
+        template = _build_template(custom_domain="oscar-prod.opensearch.org")
+        template.has_resource("AWS::Route53::HostedZone", {
+            "DeletionPolicy": "Retain",
+        })

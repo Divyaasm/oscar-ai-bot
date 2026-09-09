@@ -12,11 +12,12 @@ This module defines the API Gateway with Slack webhook endpoints, security,
 and monitoring for the OSCAR Slack Bot infrastructure.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from aws_cdk import RemovalPolicy, Stack
 from aws_cdk import aws_apigateway as apigateway
 from aws_cdk import aws_logs as logs
+from aws_cdk import aws_route53 as route53
 from aws_cdk import aws_wafv2 as wafv2
 from constructs import Construct
 
@@ -38,6 +39,7 @@ class OscarApiGatewayStack(Stack):
         lambda_stack: Any,
         permissions_stack: Any,
         environment: str,
+        custom_domain: Optional[str] = None,
         **kwargs
     ) -> None:
         """
@@ -47,6 +49,14 @@ class OscarApiGatewayStack(Stack):
             construct_id: The ID of the construct
             lambda_stack: The Lambda stack with functions
             permissions_stack: The permissions stack with IAM roles
+            environment: The deployment environment name (e.g. beta, prod)
+            custom_domain: Optional custom domain name (e.g. oscar-prod.opensearch.org).
+                When set, this stack creates a PUBLIC Route 53 hosted zone for the
+                domain. This is Phase 1 of the custom domain rollout: the zone must
+                exist before its name servers can be delegated (NS records) under
+                the parent domain (opensearch.org). The ACM certificate and API
+                Gateway custom domain are added in a later phase, once the NS
+                delegation is in place. Leave None to disable.
             **kwargs: Additional keyword arguments for Stack
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -54,6 +64,7 @@ class OscarApiGatewayStack(Stack):
         self.lambda_stack = lambda_stack
         self.permissions_stack = permissions_stack
         self.env_name = environment
+        self.custom_domain = custom_domain
         # Get the main Lambda function and API Gateway role
         self.lambda_function = lambda_stack.lambda_functions[lambda_stack.get_supervisor_agent_function_name(self.env_name)]
         self.github_webhook_function = lambda_stack.lambda_functions[lambda_stack.get_github_webhook_handler_function_name(self.env_name)]
@@ -70,6 +81,9 @@ class OscarApiGatewayStack(Stack):
 
         # Configure GitHub webhook endpoint
         self._configure_github_webhook_endpoint()
+
+        if self.custom_domain:
+            self._configure_custom_domain(self.custom_domain)
 
         # Attach WAF for rate limiting and payload protection
         self.web_acl = self._create_waf()
@@ -178,6 +192,21 @@ class OscarApiGatewayStack(Stack):
             github_integration,
             authorization_type=apigateway.AuthorizationType.NONE,
         )
+
+    def _configure_custom_domain(self, custom_domain: str) -> None:
+        """
+        Create a PUBLIC Route 53 hosted zone for the custom domain (Phase 1).
+
+        This is intentionally the ONLY custom-domain resource created here. The
+        ACM certificate and API Gateway custom domain are added in a later phase
+
+        """
+        hosted_zone = route53.PublicHostedZone(
+            self, "ApiCustomDomainHostedZone",
+            zone_name=custom_domain,
+        )
+        hosted_zone.apply_removal_policy(RemovalPolicy.RETAIN)
+        self.hosted_zone = hosted_zone
 
     def _create_waf(self) -> wafv2.CfnWebACL:
         """Create a WAFv2 WebACL with rate limiting, managed rules, and size constraints."""
