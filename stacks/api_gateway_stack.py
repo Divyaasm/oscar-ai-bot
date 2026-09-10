@@ -196,9 +196,9 @@ class OscarApiGatewayStack(Stack):
     def _configure_custom_domain(self, custom_domain: str) -> None:
         """
         Attach a custom domain to the API using an in-stack ACM certificate,
-        backed by a public Route 53 hosted zone owned by this account.
-
+-       backed by a public Route 53 hosted zone owned by this account.
         """
+
         # 1. Public hosted zone owned by this account for the subdomain.
         hosted_zone = route53.PublicHostedZone(
             self, "ApiCustomDomainHostedZone",
